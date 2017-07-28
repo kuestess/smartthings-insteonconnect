@@ -10,7 +10,7 @@
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
  *  for the specific language governing permissions and limitations under the License.
  *
- *	Insteon Switch
+ *	Insteon Scene
  *
  *	Author: hypermoose
  *	Date: 2016-06-19
@@ -19,7 +19,7 @@
  *  Date: 07/27/2017
  */
 metadata {
-	definition (name: "Insteon Switch", namespace: "kuestess", author: "kuestess") {
+	definition (name: "Insteon Scene", namespace: "kuestess", author: "kuestess") {
 		capability "Actuator"
 		capability "Switch"
         capability "Sensor"
