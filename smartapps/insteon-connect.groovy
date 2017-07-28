@@ -16,8 +16,9 @@
  *	Date: 2016-06-10
  * 
  *  Updated by kuestess
- *  Date: 05/19/2017
+ *  Date: 07/27/2017
  */
+
 definition(
 		name: "Insteon (Connect)",
 		namespace: "kuestess",
@@ -75,12 +76,27 @@ def authPage() {
         
 		def devices = getInsteonDevices()
 		log.debug "Device list: $devices"
-		return dynamicPage(name: "auth", title: "Devices", uninstall: true) {
+		
+        def scenes = getInsteonScenes()
+        log.debug "Scene list: $scenes"
+           
+        log.debug "Auth token: $atomicState.authToken"
+        
+        def devices_switch = atomicState.devices_switch 
+        log.debug "Switch device list: $devices_switch"
+        
+        def devices_iolinc = atomicState.devices_iolinc  
+        log.debug "IOLinc device list: $devices_iolinc"
+        
+        return dynamicPage(name: "auth", title: "Devices", uninstall: true) {
 			section("Switches"){
-				input(name: "switches", title:"", type: "enum", required:true, multiple:true, description: "Tap to choose", metadata:[values:devices])
+				input(name: "switches", title:"", type: "enum", required:false, multiple:true, description: "Tap to choose", metadata:[values:devices_switch])
 			}
             section("IOLinc"){
-				input(name: "iolinc", title:"", type: "enum", required:false, multiple:true, description: "Tap to choose", metadata:[values:devices])
+				input(name: "iolinc", title:"", type: "enum", required:false, multiple:true, description: "Tap to choose", metadata:[values:devices_iolinc])
+			}
+            section("Scenes"){
+				input(name: "scenes", title:"", type: "enum", required:false, multiple:true, description: "Tap to choose", metadata:[values:scenes])
 			}
 		}
 	}
@@ -242,6 +258,9 @@ def getInsteonDevices() {
 	]
 
 	def devices = [:]
+    def devices_switch = [:]
+    def devices_iolinc = [:]
+    
 	try {
 		httpGet(deviceListParams) { resp ->
 
@@ -254,14 +273,14 @@ def getInsteonDevices() {
                     if (devCat == 1 || devCat == 2) {
                         def value = "${device.DeviceName}"
                         def key = "insteon_switch." + "${device.DeviceID}"
-                        devices["${key}"] = value
+                        devices_switch["${key}"] = value
                     }
                     // Pick IOLincs
-                    //if (devCat == 7) {
-                    //    def value = "${device.DeviceName}"
-                    //    def key = "insteon_iolinc." + "${device.DeviceID}"
-                    //    devices["${key}"] = value
-                    //}
+                    if (devCat == 7) {
+                        def value = "${device.DeviceName}"
+                        def key = "insteon_iolinc." + "${device.DeviceID}"
+                        devices_iolinc["${key}"] = value
+                    }
 				}
 
 			} else {
@@ -277,9 +296,55 @@ def getInsteonDevices() {
             refreshAuthToken()
         }
     }
-                
+        
+    atomicState.devices_switch = devices_switch
+    atomicState.devices_iolinc = devices_iolinc
+    
+    devices << devices_switch
+    devices << devices_iolinc
     atomicState.devices = devices
+    
 	return devices
+}
+
+def getInsteonScenes() {
+	log.debug "getting device list"
+
+	def sceneListParams = [
+			uri: apiEndpoint,
+			path: "/api/v2/scenes",
+			headers: ["Content-Type": "text/json", "Authorization": "Bearer ${atomicState.authToken}", "Authentication": "APIKey ${smartThingsClientId}"],
+            query: ["properties": "all"]
+	]
+
+	def scenes = [:]
+    
+	try {
+		httpGet(sceneListParams) { resp ->
+        
+			if (resp.status == 200) {
+				resp.data.SceneList.each { scene ->
+                	def value = "${scene.SceneName}"
+                    def key = "insteon_scene." + "${scene.SceneID}"
+                    scenes["${key}"] = value
+				}
+
+			} else {
+				log.debug "http status: ${resp.status}"
+			}
+		}
+	} catch (groovyx.net.http.HttpResponseException e) {
+        log.trace "Exception getting devices: " + e.response.data
+        if (e.response.data.code == 4014 || e.response.data.code == 4012) {
+            atomicState.action = "getInsteonDevices"
+            def retry = true
+            log.debug "Refreshing your auth_token!"
+            refreshAuthToken()
+        }
+    }
+
+    atomicState.scenes = scenes
+	return scenes
 }
 
 def installed() {
@@ -297,29 +362,54 @@ def initialize() {
 
 	log.debug "initialize"
 
-	def devices = settings.switches.collect { dni ->
-		def d = getChildDevice(dni)
-		if(!d) {
-            d = addChildDevice(app.namespace, getChildName(), dni, null, ["label":"${atomicState.devices[dni]}" ?: "Insteon Switch"])
-			log.debug "created ${d.displayName} with id $dni"
+    def installedDevices = settings?.switches + settings?.iolinc + settings?.scenes
+    	installedDevices = installedDevices.minus(null)
+        atomicState.installedDevices = installedDevices
+        
+    	log.debug "Installed devices: $installedDevices"
+
+	def devices = installedDevices.collect { dni ->
+        def deviceId = dni.split(/\./).last()        
+    	def deviceType = dni.split(/\./).first()
+        
+        def d = getChildDevice(dni)
+         
+        if(!d) {
+            if(deviceType == "insteon_switch") {
+            	d = addChildDevice(app.namespace, "Insteon Switch", dni, null, ["label":"${atomicState.devices[dni]}" ?: "Insteon Switch"])
+				log.debug "created ${d.displayName} with id $dni"
+            }
+            
+            if(deviceType == "insteon_iolinc") {
+            	d = addChildDevice(app.namespace, "Insteon IOLinc", dni, null, ["label":"${atomicState.devices[dni]}" ?: "Insteon IOLinc"])
+				log.debug "created ${d.displayName} with id $dni"
+            }
+            
+            if(deviceType == "insteon_scene") {
+            	d = addChildDevice(app.namespace, "Insteon Scene", dni, null, ["label":"${atomicState.scenes[dni]} (Scene)" ?: "Insteon Scene"])
+				log.debug "created ${d.displayName} with id $dni"
+            }
+            
 		} else {
 			log.debug "found ${d.displayName} with id $dni already exists"
 		}
-		return d
+		
+        return d
 	}
-    
+        
 	log.debug "created ${devices.size()} devices."
 
 	def delete  // Delete any that are no longer in settings
-	if (!devices) {
+	
+    if (!devices) { //If no devices selected
 		log.debug "delete all switches"
 		delete = getAllChildDevices() //inherits from SmartApp (data-management)
-	} else { //delete only switches
-		log.debug "delete individual switches"
-        
-		delete = getChildDevices().findAll { !settings.switches.contains(it.deviceNetworkId) }
-	}
-	log.warn "delete: ${delete}, deleting ${delete.size()} switches"
+	} else {
+		log.debug "delete individual devices"
+        delete = getChildDevices().findAll { !installedDevices.contains(it.deviceNetworkId) } 
+		}
+	
+    log.warn"delete: ${delete}, deleting ${delete.size()} devices"
 	delete.each { deleteChildDevice(it.deviceNetworkId) } //inherits from SmartApp (data-management)
 
 	//send activity feeds to tell that device is connected
@@ -333,9 +423,9 @@ def initialize() {
     atomicState.deviceStatus = [:]
 
 	pollHandler() //first time polling
-
-	//automatically update devices status every 5 mins
-	runEvery5Minutes("poll")
+    
+    //automatically update devices status every 5 mins
+	runEvery5Minutes(poll)
 }
 
 def pollHandler() {
@@ -344,41 +434,54 @@ def pollHandler() {
 }
 
 def pollChildren(child = null) {
-	def result = false;
-    def hasPending = false;
+	def result = false
+    def hasPending = [:]
     
   	def pollData = atomicState.pollData
-    def deviceStatus = atomicState.deviceStatus
-   
-    settings.switches.collect { dni ->
-    	def deviceId = dni.split(/\./).last()        
-           
+    //log.debug "Starting polldata: $polldata"
+    
+    def installedDevices = settings?.switches + settings?.iolinc + settings?.scenes
+   	installedDevices = installedDevices.minus(null)
+    
+    def commandText
+    
+    installedDevices.collect { dni ->  
+        def deviceId = dni?.split(/\./)?.last()        
+    	def deviceType = dni?.split(/\./)?.first()
+        
         try {
-            //if (pollData[dni] == null) {
-            
-            	log.debug "polling child: $deviceId"
-            
-                def cmdParams = [
-                    uri: apiEndpoint,
-                    path: "/api/v2/commands",
-                    headers: ["Content-Type": "text/json", "Authorization": "Bearer ${atomicState.authToken}", "Authentication": "APIKey ${smartThingsClientId}"],
-                    body: '{ "command": "get_status", "device_id": ' + "${deviceId}" + ' }'
-                ]
-                httpPost(cmdParams) { resp ->
-                    if(resp.status == 200 || resp.status == 202) {
-                        if (resp.data.status == "pending") {
-                            log.debug "command still pending for ${dni}"
-                            pollData[dni] = resp.data.link
-                            hasPending = true
-                        } else {
-                        	log.error "Unexpected result: ${resp.data}"
+            if(deviceType != "insteon_scene") {
+                if (pollData[dni] == null) { 
+                    log.debug "polling child: $deviceId"
+
+                    if(deviceType == "insteon_iolinc") {
+                        commandText = "get_sensor_status"
+                    } else {
+                        commandText = "get_status"
+                    }
+
+                    def cmdParams = [
+                        uri: apiEndpoint,
+                        path: "/api/v2/commands",
+                        headers: ["Content-Type": "text/json", "Authorization": "Bearer ${atomicState.authToken}", "Authentication": "APIKey ${smartThingsClientId}"],
+                        body: '{ "command": ' + '"' + "${commandText}" + '"' + ', "device_id": ' + "${deviceId}" + ' }'
+                    ]
+                    httpPost(cmdParams) { resp ->
+                        if(resp.status == 200 || resp.status == 202) {
+                            if (resp.data.status == "pending") {
+                                log.debug "command now pending for ${dni}"
+                                pollData[dni] = resp.data.link
+                                hasPending[dni] = true                  
+                            } else {
+                                log.error "Unexpected result: ${resp.data}"
+                            }
                         }
                     }
                 }
-        	//}
+            }
         } catch (groovyx.net.http.HttpResponseException e) {
             log.trace "Exception Sending Json: " + e.response.data
-            debugEvent ("sent Json & got http status ${e.statusCode}")
+            debugEvent ("Sent $cmdparams & got http status ${e.statusCode}")
             if (e.response.data.code == 4014 || e.response.data.code == 4012) {
                 atomicState.action = "pollChildren"
                 log.debug "Refreshing your auth_token!"
@@ -393,55 +496,64 @@ def pollChildren(child = null) {
     }
     
     atomicState.pollData = pollData
-    atomicState.deviceStatus = deviceStatus
-    log.debug "pollChildren updated pollData = ${pollData}"
-    log.debug "pollChildren updated deviceStatus = ${deviceStatus}"
-    log.debug "Has pending: ${hasPending}"
+    atomicState.hasPending = hasPending
+    //log.debug "pollChildren updated pollData = ${pollData}"
+    //log.debug "pollChildren updated deviceStatus = ${deviceStatus}"
+    //log.debug "Has pending: ${hasPending}.  Checking links..."
     
-    if (hasPending) {
-   		log.debug "Scheduling checkPendingRequests"
-    	runIn(60, "checkPendingRequests")
-    }
+    log.debug "Scheduling checkPendingRequests"
+    runIn(5, checkPendingRequests)
     
 	return true
 }
 
 def checkPendingRequests() {
-	def stillPending = false;
-    
-    log.debug "checkPendingRequests called"
-    
+	def stillPending = false
+    def hasPending = atomicState.hasPending
+    //log.debug "Check pending requests hasPending: $hasPending"
   	def pollData = atomicState.pollData
     def deviceStatus = atomicState.deviceStatus
-   
-    settings.switches.collect { dni ->
+    def devices = getChildDevices()
+    
+    def installedDevices = settings?.switches + settings?.iolinc// + settings?.scenes //scenes don't have status
+   	installedDevices = installedDevices.minus(null)
+	
+    installedDevices.collect { dni ->
     	def deviceId = dni.split(/\./).last()        
            
         try {
             if (pollData[dni] != null) {
-            
                 log.debug "Checking pending request for ${dni}"         
-             
+                
             	def getParams = [
                     uri: apiEndpoint,
                     path: pollData[dni],
                     headers: ["Content-Type": "text/json", "Authorization": "Bearer ${atomicState.authToken}", "Authentication": "APIKey ${smartThingsClientId}"],
                 ]
                 httpGet(getParams) { resp ->
-                    log.debug "Response status: ${resp.status}"
+                    log.debug "${dni} response status: ${resp.status}"
                     if(resp.status == 200) {
 
-                        log.debug "updated ${resp.data}"
+                        log.debug "${dni} response data: ${resp.data}"
 
                         if (resp.data.status == "succeeded") {
                             pollData[dni] = null  // Clear the poll data
+                            hasPending[dni] = false
+                            log.debug "Device status: $resp.data.response.  Clearing polldata for $dni"
                             deviceStatus[dni] = resp.data.response  // Save the response
-                        } else if (resp.data.status != "pending") {
-                        	log.error "Unexpected result: ${resp.data}"
-                            pollData[dni] = null  // Clear the poll data
+                            //Send event
+                            devices.findAll( { it.deviceNetworkId == dni} ).each {
+							log.info "Found device: ${it}.  Sending event: ${deviceStatus[dni]}"
+                            it.generateEvent(deviceStatus[dni])}
+                        } else if (resp.data.status == "pending"){
+                        	log.info "Got pending for $dni.  Response data: ${resp.data}"
+                            hasPending[dni] = true
+                            log.debug "Rescheduling checkPendingRequests for $dni."
+                            runIn(10, checkPendingRequests)
                         } else {
-                        	stillPending = true;
-                        }
+                        	log.error "Unexpected result: ${resp.data}"
+                            pollData[dni] = null  // Clear the poll data 
+                        } 
                     }
                 }
             }
@@ -463,37 +575,27 @@ def checkPendingRequests() {
     
     atomicState.pollData = pollData
     atomicState.deviceStatus = deviceStatus
-    log.debug "checkPendingRequests updated pollData = ${pollData}"
-    log.debug "checkPendingRequests updated deviceStatus = ${deviceStatus}"
+    //log.debug "checkPendingRequests updated pollData = ${pollData}"
+    //log.debug "checkPendingRequests updated deviceStatus = ${deviceStatus}"
     
     if (stillPending) {
     	log.debug "Rescheduling checkPendingRequests"
-        runIn(60, checkPendingRequests);
-    }
-    
-    // Generate events for changes
-    devices.each { child ->
-        if(atomicState.deviceStatus[child.device.deviceNetworkId] != null) {
-            def tData = atomicState.deviceStatus[child.device.deviceNetworkId]
-            log.info "pollChild(child)>> data for ${child.device.deviceNetworkId} : ${tData}"
-            child.generateEvent(tData) //parse received message from parent
-       }
+        runIn(5, checkPendingRequests)
     }
     
 	return true
 }
 
-
 // Poll Child is invoked from the Child Device itself as part of the Poll Capability
 def pollChild(){
-
+	
 	def devices = getChildDevices()
 
 	if (pollChildren()){
 		devices.each { child ->
             if(atomicState.deviceStatus[child.device.deviceNetworkId] != null) {
                 def tData = atomicState.deviceStatus[child.device.deviceNetworkId]
-                log.info "pollChild(child)>> data for ${child.device.deviceNetworkId} : ${tData}"
+                log.info "Refresh pollChild(child)>> data for ${child.device.deviceNetworkId} : ${tData}"
                 child.generateEvent(tData) //parse received message from parent
            }
 		}
@@ -586,49 +688,59 @@ private refreshAuthToken() {
 }
 
 def switchOn(child, deviceNetworkId) {
-
-	def deviceId = deviceNetworkId.split(/\./).last()
+	def jsonRequestBody
     
+	def deviceId = deviceNetworkId.split(/\./).last()
+    def deviceType = deviceNetworkId.split(/\./).first()
     def deviceStatus = atomicState.deviceStatus;
-
-	def jsonRequestBody = '{ "command": "on", "device_id": ' + "${deviceId}" + ' }'
-	def result = sendJson(jsonRequestBody)
+	
+    if(deviceType == "insteon_scene") {
+		jsonRequestBody = '{ "command": "on", "scene_id": ' + "${deviceId}" + ' }'
+	} else {jsonRequestBody = '{ "command": "on", "device_id": ' + "${deviceId}" + ' }'}
+    
+    def result = sendJson(jsonRequestBody)
     
     if (result) {
-    	deviceStatus[deviceNetworkId] = '{level: 100}'
-        atomicState.deviceStatus = deviceStatus
+    	//deviceStatus[deviceNetworkId] = '[level: 100]'
+        //atomicState.deviceStatus = deviceStatus
     }
 	return result
 }
 
 def switchOff(child, deviceNetworkId) {
-
-	def deviceId = deviceNetworkId.split(/\./).last()
+	def jsonRequestBody
     
+	def deviceId = deviceNetworkId.split(/\./).last()
+    def deviceType = deviceNetworkId.split(/\./).first()
     def deviceStatus = atomicState.deviceStatus;
 
-	def jsonRequestBody = '{ "command": "off", "device_id": ' + "${deviceId}" + ' }'
-	def result = sendJson(jsonRequestBody)
+    if(deviceType == "insteon_scene") {
+		jsonRequestBody = '{ "command": "off", "scene_id": ' + "${deviceId}" + ' }'
+	} else {jsonRequestBody = '{ "command": "off", "device_id": ' + "${deviceId}" + ' }'}
+	
+    def result = sendJson(jsonRequestBody)
     if (result) {
-    	deviceStatus[deviceNetworkId] = '{level: 0}'
-        atomicState.deviceStatus = deviceStatus
+    	//deviceStatus[deviceNetworkId] = '[level: 0]'
+        //atomicState.deviceStatus = deviceStatus
     }
 	return result
 }
 
 def switchLevel(child, deviceNetworkId, level) {
-	log.debug "Calling switchLevel"
-	def deviceId = deviceNetworkId.split(/\./).last()
+	def jsonRequestBody
     
+	def deviceId = deviceNetworkId.split(/\./).last()
+    def deviceType = deviceNetworkId.split(/\./).first()
     def deviceStatus = atomicState.deviceStatus;
-	log.debug "FirstDeviceStatus ${deviceStatus}"
-	def jsonRequestBody = '{ "command": "on", "device_id": ' + "${deviceId}" + ', "level":' + "${level}" + ' }'
-	log.debug "JSONRequestBody ${jsonRequestBody}"
+	
+	if(deviceType == "insteon_scene") {
+		jsonRequestBody = '{ "command": "on", "scene_id": ' + "${deviceId}" + ', "level":' + "${level}" + ' }'
+	} else {jsonRequestBody = '{ "command": "on", "device_id": ' + "${deviceId}" + ', "level":' + "${level}" + ' }'}
+	
     def result = sendJson(jsonRequestBody)
-    //log.debug "DimResult ${result}"
     
     if (result) {
-        deviceStatus[deviceNetworkId] = '{level: ' + "${level}" + '}'
+        deviceStatus[deviceNetworkId] = '[level: ' + "${level}" + ']'
         atomicState.deviceStatus = deviceStatus
         log.debug "DeviceStatus ${atomicState.deviceStatus}"
     }
@@ -655,7 +767,7 @@ def sendJson(child = null, String jsonBody) {
 				if (resp.data.status != "failed")
 					log.debug "Successful call to insteaon API."
 				else {
-					log.debug "Error return code = ${resp.data.status.code}"
+					log.debug "Error return code = ${resp.data.status.code}."
 					debugEvent("Error return code = ${resp.data.status.code}")
 				}
 			}
@@ -680,7 +792,6 @@ def sendJson(child = null, String jsonBody) {
 		return false
 }
 
-def getChildName()           { "Insteon Switch" }
 def getServerUrl()           { return "https://graph.api.smartthings.com" }
 def getShardUrl()            { return getApiServerUrl() }
 def getCallbackUrl()        { "https://graph.api.smartthings.com/oauth/callback" }
